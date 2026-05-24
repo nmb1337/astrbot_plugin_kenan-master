@@ -29,18 +29,37 @@ class GroupBroadcast(Star):
         super().__init__(context)
         self.config = config
         self._scheduler_task: asyncio.Task | None = None
+        self._scheduler_started: bool = False
+        self._last_heartbeat: str = ""
 
     # ==================== 生命周期 ====================
 
+    async def initialize(self):
+        """
+        插件初始化时启动调度器。
+        initialize 在每次插件加载/热重载时都会调用，比 on_astrbot_loaded 更可靠。
+        """
+        await self._ensure_scheduler_running()
+
     @filter.on_astrbot_loaded()
     async def _on_bot_loaded(self):
-        """Bot 加载完成后启动调度器"""
-        if self.config.get("enable_schedule", False):
-            self._scheduler_task = asyncio.create_task(self._scheduler_loop())
-            logger.info("[群聊定时广播] 调度器已启动")
+        """Bot 首次加载完成后的兜底启动（热重载时可能不会触发此钩子）。"""
+        await self._ensure_scheduler_running()
+
+    async def _ensure_scheduler_running(self):
+        """确保调度器已启动（幂等操作）。"""
+        if self._scheduler_started:
+            return
+        if not self.config.get("enable_schedule", False):
+            logger.info("[群聊定时广播] 定时发送未启用，调度器不启动")
+            return
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+        self._scheduler_started = True
+        logger.info("[群聊定时广播] ✅ 调度器已启动")
 
     async def terminate(self):
         """插件卸载时停止调度器"""
+        self._scheduler_started = False
         if self._scheduler_task:
             self._scheduler_task.cancel()
             logger.info("[群聊定时广播] 调度器已停止")
@@ -51,18 +70,34 @@ class GroupBroadcast(Star):
         """
         定时调度循环，每 30 秒检查一次当前时间是否匹配配置的发送时间。
         使用 KV 存储（按日期+时间组合键）防止同一分钟重复发送。
+        每 5 分钟打印一次心跳日志，方便确认调度器存活。
         """
-        while True:
+        heartbeat_interval = 5 * 60  # 每 5 分钟打一次心跳
+        last_heartbeat_ts = 0.0
+
+        logger.info("[群聊定时广播] 🔄 调度循环开始运行")
+        while self._scheduler_started:
             try:
                 now = datetime.now()
                 current_time = now.strftime("%H:%M")
                 schedule_times = self.config.get("schedule_times", [])
 
+                # 心跳日志
+                if now.timestamp() - last_heartbeat_ts >= heartbeat_interval:
+                    last_heartbeat_ts = now.timestamp()
+                    self._last_heartbeat = now.strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(
+                        f"[群聊定时广播] 💓 调度器心跳 [{self._last_heartbeat}] "
+                        f"白名单: {len(self.config.get('group_whitelist', []))} 个群, "
+                        f"发送时间: {schedule_times}"
+                    )
+
+                # 时间匹配
                 if current_time in schedule_times:
                     today_key = f"sent_{now.strftime('%Y%m%d')}_{current_time}"
                     already_sent = await self.get_kv_data(today_key, False)
                     if not already_sent:
-                        logger.info(f"[群聊定时广播] 触发定时发送: {current_time}")
+                        logger.info(f"[群聊定时广播] 🚀 触发定时发送: {current_time}")
                         await self._do_scheduled_broadcast()
                         await self.put_kv_data(today_key, True)
 
@@ -71,7 +106,7 @@ class GroupBroadcast(Star):
                 logger.info("[群聊定时广播] 调度循环被取消")
                 break
             except Exception as e:
-                logger.error(f"[群聊定时广播] 调度器异常: {e}")
+                logger.error(f"[群聊定时广播] 调度器异常: {e}", exc_info=True)
                 await asyncio.sleep(30)
 
     async def _do_scheduled_broadcast(self):
@@ -81,40 +116,59 @@ class GroupBroadcast(Star):
         image_url = self.config.get("schedule_image_url", "")
 
         if not group_whitelist:
-            logger.warning("[群聊定时广播] 白名单为空，跳过定时发送")
+            logger.warning("[群聊定时广播] ⚠️ 白名单为空，跳过定时发送")
             return
+
+        logger.info(f"[群聊定时广播] 开始向 {len(group_whitelist)} 个群发送广播")
+        success_count = 0
+        skip_count = 0
+        fail_count = 0
 
         for group_id in group_whitelist:
             try:
                 umo = await self.get_kv_data(f"umo_{group_id}", None)
                 if not umo:
                     logger.warning(
-                        f"[群聊定时广播] 群 {group_id} 尚未记录 unified_msg_origin，跳过"
+                        f"[群聊定时广播] ⚠️ 群 {group_id} 尚无 UMO 记录，"
+                        f"请确保白名单群内有人发言后 UMO 才会被自动捕获"
                     )
+                    skip_count += 1
                     continue
 
                 chain = self._build_message_chain(message, image_url)
                 await self.context.send_message(umo, chain)
-                logger.info(f"[群聊定时广播] 定时广播已发送至群 {group_id}")
-                await asyncio.sleep(1)  # 避免多群发送过快被限流
+                logger.info(f"[群聊定时广播] ✅ 已发送至群 {group_id}")
+                success_count += 1
+                await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"[群聊定时广播] 发送至群 {group_id} 失败: {e}")
+                logger.error(f"[群聊定时广播] ❌ 发送至群 {group_id} 失败: {e}", exc_info=True)
+                fail_count += 1
+
+        logger.info(
+            f"[群聊定时广播] 本轮发送完成: 成功 {success_count}, "
+            f"跳过(无UMO) {skip_count}, 失败 {fail_count}"
+        )
 
     # ==================== 消息监听：记录白名单群的 UMO ====================
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=-1)
     async def _on_group_message(self, event: AstrMessageEvent):
         """
-        监听所有群消息，当消息来自白名单群聊时，
-        自动记录其 unified_msg_origin，供定时发送使用。
+        监听所有群消息（低优先级，不干扰指令处理），
+        当消息来自白名单群聊时，自动记录 unified_msg_origin 供定时发送使用。
         """
         try:
             group_id = event.get_group_id()
+            if not group_id:
+                return
             whitelist = self.config.get("group_whitelist", [])
-            if group_id and group_id in whitelist:
-                await self.put_kv_data(f"umo_{group_id}", event.unified_msg_origin)
-        except Exception:
-            pass  # 静默处理，不影响正常消息流
+            if str(group_id) in whitelist:
+                umo = event.unified_msg_origin
+                if umo:
+                    await self.put_kv_data(f"umo_{group_id}", umo)
+                    logger.debug(f"[群聊定时广播] 📝 已记录群 {group_id} 的 UMO")
+        except Exception as e:
+            logger.debug(f"[群聊定时广播] UMO 记录异常（可忽略）: {e}")
 
     # ==================== 指令组 ====================
 
@@ -135,7 +189,7 @@ class GroupBroadcast(Star):
     async def whitelist_add(self, event: AstrMessageEvent, group_id: str = ""):
         """
         添加群到白名单 —— /broadcast whitelist add [group_id]
-        不填 group_id 则添加当前群。仅管理员可用。
+        不填 group_id 则添加当前群并立即捕获 UMO。仅管理员可用。
         """
         if not group_id:
             group_id = event.get_group_id()
@@ -151,6 +205,11 @@ class GroupBroadcast(Star):
         whitelist.append(group_id)
         self.config["group_whitelist"] = whitelist
         self.config.save_config()
+        # 立即捕获当前群的 UMO，避免定时发送时因无 UMO 而跳过
+        umo = event.unified_msg_origin
+        if umo:
+            await self.put_kv_data(f"umo_{group_id}", umo)
+            logger.info(f"[群聊定时广播] 📝 添加白名单时已记录群 {group_id} 的 UMO")
         yield event.plain_result(f"✅ 已添加群 {group_id} 到白名单。")
 
     @whitelist.command("remove")
@@ -204,17 +263,30 @@ class GroupBroadcast(Star):
         img_url = self.config.get("schedule_image_url", "")
         whitelist = self.config.get("group_whitelist", [])
 
+        # 检查各群的 UMO 缓存状态
+        umo_status_parts = []
+        for gid in whitelist:
+            umo = await self.get_kv_data(f"umo_{gid}", None)
+            status = "✅ 已缓存" if umo else "❌ 未缓存(需有人发言)"
+            umo_status_parts.append(f"  • {gid}: {status}")
+
         lines = [
             "📊 群聊定时广播 状态",
             "━━━━━━━━━━━━━━━━",
             f"⏰ 定时发送: {'✅ 已启用' if enable else '❌ 已禁用'}",
+            f"🔄 调度器: {'✅ 运行中' if self._scheduler_started else '❌ 未启动'}",
+        ]
+        if self._last_heartbeat:
+            lines.append(f"💓 最后心跳: {self._last_heartbeat}")
+        lines += [
             f"🕐 发送时间: {', '.join(times) if times else '未设置'}",
             f"📝 广播消息: {msg_text if msg_text else '未设置'}",
             f"🖼️ 广播图片: {img_url if img_url else '未设置'}",
             f"👥 白名单群数: {len(whitelist)}",
         ]
-        if whitelist:
-            lines.append(f"📋 白名单: {', '.join(whitelist)}")
+        if umo_status_parts:
+            lines.append("📡 UMO 缓存状态:")
+            lines.extend(umo_status_parts)
         yield event.plain_result("\n".join(lines))
 
     # ==================== 工具方法 ====================
