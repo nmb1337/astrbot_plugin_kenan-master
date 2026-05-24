@@ -2,7 +2,7 @@ import asyncio
 import os
 from datetime import datetime
 
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
@@ -292,29 +292,29 @@ class GroupBroadcast(Star):
     # ==================== 工具方法 ====================
 
     @staticmethod
-    def _build_message_chain(message: str, image_url: str) -> list:
+    def _build_message_chain(message: str, image_url: str) -> MessageChain:
         """
-        构建消息链：@全体 + 文本消息 + 图片（可选）。
+        构建消息链（MessageChain）：@全体 + 文本消息 + 图片（可选）。
 
         Args:
             message: 文本消息内容
             image_url: 图片路径，支持以下形式：
                 - http/https URL（远程图片）
                 - 本地绝对路径，如 C:/images/photo.jpg
-                - 插件目录下的相对路径（自动转为绝对路径）
                 为空则不附加图片
 
         Returns:
-            消息链列表
+            MessageChain 对象
         """
-        chain = [Comp.At(qq="all"), Comp.Plain(f"\n{message}")]
-        if not image_url:
-            return chain
+        mc = MessageChain()
+        mc.chain.append(Comp.At(qq="all"))
+        mc.chain.append(Comp.Plain(f"\n{message}"))
 
-        if image_url.startswith(("http://", "https://")):
-            chain.append(Comp.Image.fromURL(image_url))
-        elif os.path.isfile(image_url):
-            chain.append(Comp.Image.fromFileSystem(image_url))
-        else:
-            logger.warning(f"[群聊定时广播] 图片路径无效或文件不存在: {image_url}")
-        return chain
+        if image_url:
+            if image_url.startswith(("http://", "https://")):
+                mc.chain.append(Comp.Image.fromURL(image_url))
+            elif os.path.isfile(image_url):
+                mc.chain.append(Comp.Image.fromFileSystem(image_url))
+            else:
+                logger.warning(f"[群聊定时广播] 图片路径无效或文件不存在: {image_url}")
+        return mc
