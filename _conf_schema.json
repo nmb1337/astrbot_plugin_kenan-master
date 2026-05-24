@@ -1,0 +1,32 @@
+{
+  "group_whitelist": {
+    "description": "群聊白名单（群号列表）",
+    "type": "list",
+    "default": [],
+    "hint": "只有在白名单中的群聊才能接收广播和定时消息"
+  },
+  "enable_schedule": {
+    "description": "是否启用定时发送",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，将在设定的时间自动向白名单群聊发送广播"
+  },
+  "schedule_times": {
+    "description": "定时发送时间列表",
+    "type": "list",
+    "default": ["08:00", "12:00", "18:00"],
+    "hint": "格式为 HH:MM（24小时制），如 08:00、12:00、18:00。每天到达这些时间点时自动发送"
+  },
+  "schedule_message": {
+    "description": "定时广播消息文本",
+    "type": "text",
+    "default": "⏰ 定时提醒：请注意查看群公告！",
+    "hint": "定时发送时使用的文本内容"
+  },
+  "schedule_image_url": {
+    "description": "定时广播图片URL",
+    "type": "string",
+    "default": "",
+    "hint": "可选，留空则不发送图片。请使用 http/https 开头的图片链接"
+  }
+}
