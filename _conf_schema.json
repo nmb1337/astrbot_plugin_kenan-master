@@ -24,9 +24,9 @@
     "hint": "定时发送时使用的文本内容"
   },
   "schedule_image_url": {
-    "description": "定时广播图片URL",
+    "description": "定时广播图片路径",
     "type": "string",
     "default": "",
-    "hint": "可选，留空则不发送图片。请使用 http/https 开头的图片链接"
+    "hint": "可选，留空则不发送图片。支持 http/https 远程链接，也支持本地绝对路径（如 C:/images/photo.jpg）"
   }
 }
